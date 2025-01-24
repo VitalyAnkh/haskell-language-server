@@ -8,12 +8,23 @@ set -eux
 . .github/scripts/env.sh
 . .github/scripts/common.sh
 
-test_package="bytestring-0.11.1.0"
-test_module="Data/ByteString.hs"
+test_package="text-2.1.1"
+test_module="src/Data/Text.hs"
 
 create_cradle() {
     echo "cradle:" > hie.yaml
     echo "  cabal:" >> hie.yaml
+}
+
+# Tests and benchmarks can't be built on some GHC versions, such as GHC 9.10.1 on Windows.
+# Disable these packages for now, building bytestring-0.12.1.0 works completely fine.
+create_cabal_project() {
+    echo "packages: ./" > cabal.project
+    echo "" >> cabal.project
+    echo "tests: False" >> cabal.project
+    echo "benchmarks: False" >> cabal.project
+
+    echo "flags: -simdutf -pure-haskell" >> cabal.project
 }
 
 enter_test_package() {
@@ -38,12 +49,18 @@ test_all_hls() {
         bin_noexe=${bin/.exe/}
         if ! [[ "${bin_noexe}" =~ "haskell-language-server-wrapper" ]] && ! [[ "${bin_noexe}" =~ "~" ]] ; then
             if ghcup install ghc --set "${bin_noexe/haskell-language-server-/}" ; then
-                "${hls}" typecheck "${test_module}" || fail "failed to typecheck with HLS for GHC ${bin_noexe/haskell-language-server-/}"
+                "${hls}" --debug typecheck "${test_module}" || fail "failed to typecheck with HLS for GHC ${bin_noexe/haskell-language-server-/}"
+
+                # After running the test, free up disk space by deleting the unneeded GHC version.
+                # Helps us staying beneath the 14GB SSD disk limit.
+                ghcup rm ghc "${bin_noexe/haskell-language-server-/}"
             else
                 fail "GHCup failed to install GHC ${bin_noexe/haskell-language-server-/}"
             fi
         fi
     done
+    # install the recommended GHC version so the wrapper can launch HLS
+    ghcup install ghc --set recommended
     "$bindir/haskell-language-server-wrapper${ext}" typecheck "${test_module}" || fail "failed to typecheck with HLS wrapper"
 }
 
@@ -53,11 +70,10 @@ uname
 env
 
 # ensure ghcup
-if ! command -v ghcup ; then
-    install_ghcup
-fi
+install_ghcup
+ghcup install ghc --set 9.4.8
 
-ecabal update
+(cd .. && ecabal update) # run cabal update outside project dir
 
 # unpack
 TARBALL_PREFIX="haskell-language-server"
@@ -72,6 +88,7 @@ case "${TARBALL_EXT}" in
 
         enter_test_package
         create_cradle
+        create_cabal_project
         test_all_hls "$GHCUP_BIN"
 
         ;;
@@ -101,6 +118,7 @@ case "${TARBALL_EXT}" in
 
         enter_test_package
         create_cradle
+        create_cabal_project
         test_all_hls "$(ghcup whereis bindir)"
 
         ;;

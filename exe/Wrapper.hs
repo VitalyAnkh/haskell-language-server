@@ -1,19 +1,14 @@
-{-# LANGUAGE CPP                        #-}
-{-# LANGUAGE DataKinds                  #-}
-{-# LANGUAGE ExplicitNamespaces         #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase                 #-}
-{-# LANGUAGE NamedFieldPuns             #-}
-{-# LANGUAGE OverloadedStrings          #-}
-{-# LANGUAGE RecordWildCards            #-}
-{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE CPP               #-}
+{-# LANGUAGE DataKinds         #-}
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 -- | This module is based on the hie-wrapper.sh script in
 -- https://github.com/alanz/vscode-hie-server
 module Main where
 
 import           Control.Monad.Extra
 import           Data.Default
-import           Data.Either.Extra                  (eitherToMaybe)
 import           Data.Foldable
 import           Data.List
 import           Data.List.Extra                    (trimEnd)
@@ -45,25 +40,22 @@ import qualified Data.Text                          as T
 import qualified Data.Text.IO                       as T
 import           Development.IDE.LSP.LanguageServer (runLanguageServer)
 import qualified Development.IDE.Main               as Main
-import           Development.IDE.Types.Logger       (Doc, Logger (Logger),
-                                                     Pretty (pretty),
-                                                     Recorder (logger_),
-                                                     WithPriority (WithPriority),
+import           Ide.Logger                         (Doc, Pretty (pretty),
+                                                     Recorder, WithPriority,
                                                      cmapWithPrio,
-                                                     makeDefaultStderrRecorder,
-                                                     toCologActionWithPrio)
-import           GHC.Stack.Types                    (emptyCallStack)
+                                                     makeDefaultStderrRecorder)
 import           Ide.Plugin.Config                  (Config)
 import           Ide.Types                          (IdePlugins (IdePlugins))
+import           Language.LSP.Protocol.Message      (Method (Method_Initialize),
+                                                     SMethod (SMethod_Exit, SMethod_WindowShowMessageRequest),
+                                                     TRequestMessage,
+                                                     TResponseError)
+import           Language.LSP.Protocol.Types        (MessageActionItem (MessageActionItem),
+                                                     MessageType (MessageType_Error),
+                                                     ShowMessageRequestParams (ShowMessageRequestParams),
+                                                     type (|?) (InL))
 import           Language.LSP.Server                (LspM)
 import qualified Language.LSP.Server                as LSP
-import           Language.LSP.Types                 (MessageActionItem (MessageActionItem),
-                                                     MessageType (MtError),
-                                                     Method (Initialize),
-                                                     RequestMessage,
-                                                     ResponseError,
-                                                     SMethod (SExit, SWindowShowMessageRequest),
-                                                     ShowMessageRequestParams (ShowMessageRequestParams))
 
 -- ---------------------------------------------------------------------
 
@@ -82,9 +74,12 @@ main = do
           putStrLn "Tool versions found on the $PATH"
           putStrLn $ showProgramVersionOfInterest programsOfInterest
           putStrLn "Tool versions in your project"
-          cradle <- findProjectCradle' False
-          ghcVersion <- runExceptT $ getRuntimeGhcVersion' recorder cradle
-          putStrLn $ showProgramVersion "ghc" $ mkVersion =<< eitherToMaybe ghcVersion
+          cradle <- findProjectCradle' recorder False
+          runExceptT (getRuntimeGhcVersion' cradle) >>= \case
+            Left err ->
+              T.hPutStrLn stderr (prettyError err NoShorten)
+            Right ghcVersion ->
+              putStrLn $ showProgramVersion "ghc" $ mkVersion ghcVersion
 
       VersionMode PrintVersion ->
           putStrLn hlsVer
@@ -93,18 +88,20 @@ main = do
           putStrLn haskellLanguageServerNumericVersion
 
       BiosMode PrintCradleType ->
-          print =<< findProjectCradle
+          print =<< findProjectCradle recorder
       PrintLibDir -> do
-          cradle <- findProjectCradle' False
-          (CradleSuccess libdir) <- HieBios.getRuntimeGhcLibDir (toCologActionWithPrio (cmapWithPrio pretty recorder)) cradle
+          cradle <- findProjectCradle' recorder False
+          (CradleSuccess libdir) <- HieBios.getRuntimeGhcLibDir cradle
           putStr libdir
       _ -> launchHaskellLanguageServer recorder args >>= \case
             Right () -> pure ()
             Left err -> do
               T.hPutStrLn stderr (prettyError err NoShorten)
               case args of
-                Ghcide _ -> launchErrorLSP recorder (prettyError err Shorten)
-                _        -> pure ()
+                Ghcide (GhcideArguments { argsCommand = Main.LSP }) ->
+                    launchErrorLSP recorder (prettyError err Shorten)
+
+                _ -> exitFailure
 
 launchHaskellLanguageServer :: Recorder (WithPriority (Doc ())) -> Arguments -> IO (Either WrapperSetupError ())
 launchHaskellLanguageServer recorder parsedArgs = do
@@ -115,7 +112,7 @@ launchHaskellLanguageServer recorder parsedArgs = do
   d <- getCurrentDirectory
 
   -- search for the project cradle type
-  cradle <- findProjectCradle
+  cradle <- findProjectCradle recorder
 
   -- Get the root directory from the cradle
   setCurrentDirectory $ cradleRootDir cradle
@@ -123,7 +120,7 @@ launchHaskellLanguageServer recorder parsedArgs = do
   case parsedArgs of
     Ghcide GhcideArguments{..} ->
       when argsProjectGhcVersion $ do
-        runExceptT (getRuntimeGhcVersion' recorder cradle) >>= \case
+        runExceptT (getRuntimeGhcVersion' cradle) >>= \case
           Right ghcVersion -> putStrLn ghcVersion >> exitSuccess
           Left err -> T.putStrLn (prettyError err NoShorten) >> exitFailure
     _ -> pure ()
@@ -146,7 +143,7 @@ launchHaskellLanguageServer recorder parsedArgs = do
   hPutStrLn stderr "Consulting the cradle to get project GHC version..."
 
   runExceptT $ do
-      ghcVersion <- getRuntimeGhcVersion' recorder cradle
+      ghcVersion <- getRuntimeGhcVersion' cradle
       liftIO $ hPutStrLn stderr $ "Project GHC version: " ++ ghcVersion
 
       let
@@ -171,10 +168,10 @@ launchHaskellLanguageServer recorder parsedArgs = do
 
           let cradleName = actionName (cradleOptsProg cradle)
           -- we need to be compatible with NoImplicitPrelude
-          ghcBinary <- liftIO (fmap trim <$> runGhcCmd (toCologActionWithPrio (cmapWithPrio pretty recorder)) ["-v0", "-package-env=-", "-ignore-dot-ghci", "-e", "Control.Monad.join (Control.Monad.fmap System.IO.putStr System.Environment.getExecutablePath)"])
+          ghcBinary <- liftIO (fmap trim <$> runGhcCmd ["-v0", "-package-env=-", "-ignore-dot-ghci", "-e", "Control.Monad.join (Control.Monad.fmap System.IO.putStr System.Environment.getExecutablePath)"])
                          >>= cradleResult cradleName
 
-          libdir <- liftIO (HieBios.getRuntimeGhcLibDir (toCologActionWithPrio (cmapWithPrio pretty recorder)) cradle)
+          libdir <- liftIO (HieBios.getRuntimeGhcLibDir cradle)
                       >>= cradleResult cradleName
 
           env <- Map.fromList <$> liftIO getEnvironment
@@ -191,8 +188,8 @@ cradleResult cradleName CradleNone = throwE $ NoneCradleGhcVersion cradleName
 
 -- | Version of 'getRuntimeGhcVersion' that dies if we can't get it, and also
 -- checks to see if the tool is missing if it is one of
-getRuntimeGhcVersion' :: Recorder (WithPriority (Doc ())) -> Cradle Void -> ExceptT WrapperSetupError IO String
-getRuntimeGhcVersion' recorder cradle = do
+getRuntimeGhcVersion' :: Cradle Void -> ExceptT WrapperSetupError IO String
+getRuntimeGhcVersion' cradle = do
   let cradleName = actionName (cradleOptsProg cradle)
 
   -- See if the tool is installed
@@ -203,7 +200,7 @@ getRuntimeGhcVersion' recorder cradle = do
     Direct  -> checkToolExists "ghc"
     _       -> pure ()
 
-  ghcVersionRes <- liftIO $ HieBios.getRuntimeGhcVersion (toCologActionWithPrio (cmapWithPrio pretty recorder)) cradle
+  ghcVersionRes <- liftIO $ HieBios.getRuntimeGhcVersion cradle
   cradleResult cradleName ghcVersionRes
 
   where
@@ -213,11 +210,11 @@ getRuntimeGhcVersion' recorder cradle = do
         Just _ -> pure ()
         Nothing -> throwE $ ToolRequirementMissing exe (actionName (cradleOptsProg cradle))
 
-findProjectCradle :: IO (Cradle Void)
-findProjectCradle = findProjectCradle' True
+findProjectCradle :: Recorder (WithPriority (Doc ())) -> IO (Cradle Void)
+findProjectCradle recorder = findProjectCradle' recorder True
 
-findProjectCradle' :: Bool -> IO (Cradle Void)
-findProjectCradle' log = do
+findProjectCradle' :: Recorder (WithPriority (Doc ())) -> Bool -> IO (Cradle Void)
+findProjectCradle' recorder log = do
   d <- getCurrentDirectory
 
   let initialFp = d </> "a"
@@ -229,7 +226,7 @@ findProjectCradle' log = do
         Just yaml -> hPutStrLn stderr $ "Found \"" ++ yaml ++ "\" for \"" ++ initialFp ++ "\""
         Nothing -> hPutStrLn stderr "No 'hie.yaml' found. Try to discover the project type!"
 
-  Session.loadCradle def hieYaml d
+  Session.loadCradle def (cmapWithPrio pretty recorder) hieYaml d
 
 trim :: String -> String
 trim s = case lines s of
@@ -274,26 +271,26 @@ newtype ErrorLSPM c a = ErrorLSPM { unErrorLSPM :: (LspM c) a }
 -- to shut down the LSP.
 launchErrorLSP :: Recorder (WithPriority (Doc ())) -> T.Text -> IO ()
 launchErrorLSP recorder errorMsg = do
-  let logger = Logger $ \p m -> logger_ recorder (WithPriority p emptyCallStack (pretty m))
-
-  let defaultArguments = Main.defaultArguments (cmapWithPrio pretty recorder) logger (IdePlugins [])
+  cwd <- getCurrentDirectory
+  let defaultArguments = Main.defaultArguments (cmapWithPrio pretty recorder) cwd (IdePlugins [])
 
   inH <- Main.argsHandleIn defaultArguments
 
   outH <- Main.argsHandleOut defaultArguments
 
-  let onConfigurationChange cfg _ = Right cfg
+  let parseConfig cfg _ = Right cfg
+      onConfigChange _ = pure ()
 
   let setup clientMsgVar = do
         -- Forcefully exit
         let exit = void $ tryPutMVar clientMsgVar ()
 
-        let doInitialize :: LSP.LanguageContextEnv Config -> RequestMessage Initialize -> IO (Either ResponseError (LSP.LanguageContextEnv Config, ()))
+        let doInitialize :: LSP.LanguageContextEnv Config -> TRequestMessage Method_Initialize -> IO (Either (TResponseError Method_Initialize) (LSP.LanguageContextEnv Config, ()))
             doInitialize env _ = do
 
               let restartTitle = "Try to restart"
-              void $ LSP.runLspT env $ LSP.sendRequest SWindowShowMessageRequest (ShowMessageRequestParams MtError errorMsg (Just [MessageActionItem restartTitle])) $ \case
-                    Right (Just (MessageActionItem title))
+              void $ LSP.runLspT env $ LSP.sendRequest SMethod_WindowShowMessageRequest (ShowMessageRequestParams MessageType_Error errorMsg (Just [MessageActionItem restartTitle])) $ \case
+                    Right (InL (MessageActionItem title))
                        | title == restartTitle -> liftIO exit
                     _ -> pure ()
 
@@ -310,8 +307,9 @@ launchErrorLSP recorder errorMsg = do
     inH
     outH
     (Main.argsDefaultHlsConfig defaultArguments)
-    onConfigurationChange
+    parseConfig
+    onConfigChange
     setup
 
 exitHandler :: IO () -> LSP.Handlers (ErrorLSPM c)
-exitHandler exit = LSP.notificationHandler SExit $ const $ liftIO exit
+exitHandler exit = LSP.notificationHandler SMethod_Exit $ const $ liftIO exit

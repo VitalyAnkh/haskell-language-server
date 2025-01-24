@@ -2,7 +2,6 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | Options
-{-# LANGUAGE RankNTypes #-}
 module Development.IDE.Types.Options
   ( IdeOptions(..)
   , IdePreprocessedSource(..)
@@ -19,6 +18,7 @@ module Development.IDE.Types.Options
   , ProgressReportingStyle(..)
   ) where
 
+import           Control.Lens
 import qualified Data.Text                         as T
 import           Data.Typeable
 import           Development.IDE.Core.RuleTypes
@@ -27,7 +27,8 @@ import           Development.IDE.Graph
 import           Development.IDE.Types.Diagnostics
 import           Ide.Plugin.Config
 import           Ide.Types                         (DynFlagsModifications)
-import qualified Language.LSP.Types.Capabilities   as LSP
+import qualified Language.LSP.Protocol.Lens        as L
+import qualified Language.LSP.Protocol.Types       as LSP
 
 data IdeOptions = IdeOptions
   { optPreprocessor       :: GHC.ParsedSource -> IdePreprocessedSource
@@ -88,9 +89,9 @@ data OptHaddockParse = HaddockParse | NoHaddockParse
   deriving (Eq,Ord,Show,Enum)
 
 data IdePreprocessedSource = IdePreprocessedSource
-  { preprocWarnings :: [(GHC.SrcSpan, String)]
+  { preprocWarnings :: [(GHC.SrcSpan, String)] -- TODO: Future work could we make these warnings structured as well?
     -- ^ Warnings emitted by the preprocessor.
-  , preprocErrors   :: [(GHC.SrcSpan, String)]
+  , preprocErrors   :: [(GHC.SrcSpan, String)] -- TODO: Future work could we make these errors structured as well?
     -- ^ Errors emitted by the preprocessor.
   , preprocSource   :: GHC.ParsedSource
     -- ^ New parse tree emitted by the preprocessor.
@@ -110,7 +111,7 @@ data ProgressReportingStyle
 
 clientSupportsProgress :: LSP.ClientCapabilities -> IdeReportProgress
 clientSupportsProgress caps = IdeReportProgress $ Just True ==
-    (LSP._workDoneProgress =<< LSP._window (caps :: LSP.ClientCapabilities))
+    ((\x -> x ^. L.workDoneProgress) =<< LSP._window (caps :: LSP.ClientCapabilities))
 
 defaultIdeOptions :: Action IdeGhcSession -> IdeOptions
 defaultIdeOptions session = IdeOptions
