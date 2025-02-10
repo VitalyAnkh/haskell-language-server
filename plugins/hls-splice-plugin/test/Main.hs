@@ -1,9 +1,6 @@
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE TypeOperators         #-}
 {-# LANGUAGE ViewPatterns          #-}
-
 module Main
   ( main
   ) where
@@ -68,7 +65,7 @@ tests = testGroup "splice"
 
 goldenTest :: FilePath -> ExpandStyle -> Int -> Int -> TestTree
 goldenTest fp tc line col =
-  goldenWithHaskellDoc splicePlugin (fp <> " (golden)") testDataDir fp "expected" "hs" $ \doc -> do
+  goldenWithHaskellDoc def splicePlugin (fp <> " (golden)") testDataDir fp "expected" "hs" $ \doc -> do
     -- wait for the entire build to finish, so that code actions that
     -- use stale data will get uptodate stuff
     void waitForBuildQueue
@@ -76,12 +73,12 @@ goldenTest fp tc line col =
     case find ((== Just (toExpandCmdTitle tc)) . codeActionTitle) actions of
       Just (InR CodeAction {_command = Just c}) -> do
         executeCommand c
-        void $ skipManyTill anyMessage (message SWorkspaceApplyEdit)
+        void $ skipManyTill anyMessage (message SMethod_WorkspaceApplyEdit)
       _ -> liftIO $ assertFailure "No CodeAction detected"
 
 goldenTestWithEdit :: FilePath -> FilePath -> ExpandStyle -> Int -> Int -> TestTree
 goldenTestWithEdit fp expect tc line col =
-  goldenWithHaskellDoc splicePlugin (fp <> " (golden)") testDataDir fp expect "hs" $ \doc -> do
+  goldenWithHaskellDoc def splicePlugin (fp <> " (golden)") testDataDir fp expect "hs" $ \doc -> do
      orig <- documentContents doc
      let
        lns = T.lines orig
@@ -90,11 +87,15 @@ goldenTestWithEdit fp expect tc line col =
          { _start = Position 0 0
          , _end = Position (fromIntegral $ length lns + 1) 1
          }
-     waitForAllProgressDone -- cradle
-     waitForAllProgressDone
-     alt <- liftIO $ T.readFile (fp <.> "error.hs")
+
+     void waitForDiagnostics
+     void waitForBuildQueue
+     alt <- liftIO $ T.readFile (testDataDir </> fp <.> "error.hs")
      void $ applyEdit doc $ TextEdit theRange alt
-     changeDoc doc [TextDocumentContentChangeEvent (Just theRange) Nothing alt]
+     changeDoc doc [TextDocumentContentChangeEvent $ InL
+        TextDocumentContentChangePartial {_range = theRange, _rangeLength = Nothing, _text = alt}
+        ]
+
      void waitForDiagnostics
      -- wait for the entire build to finish
      void waitForBuildQueue
@@ -102,11 +103,11 @@ goldenTestWithEdit fp expect tc line col =
      case find ((== Just (toExpandCmdTitle tc)) . codeActionTitle) actions of
        Just (InR CodeAction {_command = Just c}) -> do
          executeCommand c
-         void $ skipManyTill anyMessage (message SWorkspaceApplyEdit)
+         void $ skipManyTill anyMessage (message SMethod_WorkspaceApplyEdit)
        _ -> liftIO $ assertFailure "No CodeAction detected"
 
 testDataDir :: FilePath
-testDataDir = "test" </> "testdata"
+testDataDir = "plugins" </> "hls-splice-plugin" </> "test" </> "testdata"
 
 pointRange :: Int -> Int -> Range
 pointRange (subtract 1 -> fromIntegral -> line) (subtract 1 -> fromIntegral -> col) =

@@ -1,17 +1,11 @@
 {-# LANGUAGE CPP                       #-}
 {-# LANGUAGE DuplicateRecordFields     #-}
 {-# LANGUAGE ExtendedDefaultRules      #-}
-{-# LANGUAGE FlexibleContexts          #-}
-{-# LANGUAGE FlexibleInstances         #-}
-{-# LANGUAGE NamedFieldPuns            #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE OverloadedStrings         #-}
-{-# LANGUAGE RankNTypes                #-}
 {-# LANGUAGE RecordWildCards           #-}
-{-# LANGUAGE ScopedTypeVariables       #-}
-{-# LANGUAGE TypeApplications          #-}
 {-# LANGUAGE ViewPatterns              #-}
-{-# OPTIONS_GHC -fno-warn-type-defaults -Wno-unused-imports #-}
+{-# OPTIONS_GHC -Wno-type-defaults #-}
 
 {- |
 A plugin inspired by the REPLoid feature of <https://github.com/jyp/dante Dante>, <https://www.haskell.org/haddock/doc/html/ch03s08.html#idm140354810775744 Haddock>'s Examples and Properties and <https://hackage.haskell.org/package/doctest Doctest>.
@@ -24,47 +18,45 @@ module Ide.Plugin.Eval.CodeLens (
 ) where
 
 import           Control.Applicative                          (Alternative ((<|>)))
-import           Control.Arrow                                (second, (>>>))
-import           Control.Exception                            (try)
+import           Control.Arrow                                (second)
+import           Control.Exception                            (bracket_)
 import qualified Control.Exception                            as E
-import           Control.Lens                                 (_1, _3, ix, (%~),
-                                                               (<&>), (^.))
-import           Control.Monad                                (guard,
-                                                               void, when)
+import           Control.Lens                                 (ix, (%~), (^.))
+import           Control.Monad                                (guard, void,
+                                                               when)
 import           Control.Monad.IO.Class                       (MonadIO (liftIO))
-import           Control.Monad.Trans.Except                   (ExceptT (..))
+import           Control.Monad.Trans.Except                   (ExceptT (..),
+                                                               runExceptT)
 import           Data.Aeson                                   (toJSON)
 import           Data.Char                                    (isSpace)
 import           Data.Foldable                                (toList)
-import qualified Data.HashMap.Strict                          as HashMap
 import           Data.List                                    (dropWhileEnd,
                                                                find,
                                                                intercalate,
                                                                intersperse)
+import qualified Data.Map                                     as Map
 import           Data.Maybe                                   (catMaybes)
 import           Data.String                                  (IsString)
 import           Data.Text                                    (Text)
 import qualified Data.Text                                    as T
+import qualified Data.Text.Utf16.Rope.Mixed                   as Rope
 import           Data.Typeable                                (Typeable)
-import Development.IDE.Core.RuleTypes
-    ( NeedsCompilation(NeedsCompilation),
-      LinkableResult(linkableHomeMod),
-      tmrTypechecked,
-      TypeCheck(..))
-import Development.IDE.Core.Rules ( runAction, IdeState )
-import Development.IDE.Core.Shake
-    ( useWithStale_,
-      use_,
-      uses_ )
-import Development.IDE.GHC.Util
-    ( printOutputable, evalGhcEnv, modifyDynFlags )
-import Development.IDE.Types.Location
-    ( toNormalizedFilePath', uriToFilePath' )
+import           Development.IDE.Core.FileStore               (getUriContents)
+import           Development.IDE.Core.Rules                   (IdeState,
+                                                               runAction)
+import           Development.IDE.Core.RuleTypes               (LinkableResult (linkableHomeMod),
+                                                               TypeCheck (..),
+                                                               tmrTypechecked)
+import           Development.IDE.Core.Shake                   (useNoFile_, use_,
+                                                               uses_)
 import           Development.IDE.GHC.Compat                   hiding (typeKind,
                                                                unitState)
-import           Development.IDE.GHC.Compat.Util              (GhcException,
-                                                               OverridingBool (..))
-import           Development.IDE.Import.DependencyInformation (reachableModules)
+import           Development.IDE.GHC.Compat.Util              (OverridingBool (..))
+import           Development.IDE.GHC.Util                     (evalGhcEnv,
+                                                               modifyDynFlags)
+import           Development.IDE.Import.DependencyInformation (transitiveDeps,
+                                                               transitiveModuleDeps)
+import           Development.IDE.Types.Location               (toNormalizedFilePath')
 import           GHC                                          (ClsInst,
                                                                ExecOptions (execLineNumber, execSourceFile),
                                                                FamInst,
@@ -75,33 +67,34 @@ import           GHC                                          (ClsInst,
                                                                exprType,
                                                                getInfo,
                                                                getInteractiveDynFlags,
-                                                               isImport, isStmt, parseName,
+                                                               isImport, isStmt,
+                                                               parseName,
                                                                pprFamInst,
                                                                pprInstance,
                                                                typeKind)
 
 
-import Development.IDE.Core.RuleTypes
-    ( ModSummaryResult(msrModSummary),
-      GetModSummary(GetModSummary),
-      GhcSessionDeps(GhcSessionDeps),
-      GetDependencyInformation(GetDependencyInformation),
-      GetLinkable(GetLinkable) )
-import Development.IDE.Core.Shake ( VFSModified(VFSUnmodified) )
-import Development.IDE.Types.HscEnvEq ( HscEnvEq(hscEnv) )
-import qualified Development.IDE.GHC.Compat.Core as Compat
-    ( InteractiveImport(IIModule) )
-import qualified Development.IDE.GHC.Compat.Core as SrcLoc
-    ( unLoc, HasSrcSpan(getLoc) )
-#if MIN_VERSION_ghc(9,2,0)
-#endif
+import           Development.IDE.Core.RuleTypes               (GetLinkable (GetLinkable),
+                                                               GetModSummary (GetModSummary),
+                                                               GetModuleGraph (GetModuleGraph),
+                                                               GhcSessionDeps (GhcSessionDeps),
+                                                               ModSummaryResult (msrModSummary))
+import           Development.IDE.Core.Shake                   (VFSModified (VFSUnmodified))
+import qualified Development.IDE.GHC.Compat.Core              as Compat (InteractiveImport (IIModule))
+import qualified Development.IDE.GHC.Compat.Core              as SrcLoc (unLoc)
+import           Development.IDE.Types.HscEnvEq               (HscEnvEq (hscEnv))
 import qualified GHC.LanguageExtensions.Type                  as LangExt (Extension (..))
 
 import           Development.IDE.Core.FileStore               (setSomethingModified)
+import           Development.IDE.Core.PluginUtils
 import           Development.IDE.Types.Shake                  (toKey)
-#if MIN_VERSION_ghc(9,0,0)
 import           GHC.Types.SrcLoc                             (UnhelpfulSpanReason (UnhelpfulInteractive))
-#endif
+import           Ide.Logger                                   (Priority (..),
+                                                               Recorder,
+                                                               WithPriority,
+                                                               logWith)
+import           Ide.Plugin.Error                             (PluginError (PluginInternalError),
+                                                               handleMaybeM)
 import           Ide.Plugin.Eval.Code                         (Statement,
                                                                asStatements,
                                                                myExecStmt,
@@ -114,51 +107,39 @@ import           Ide.Plugin.Eval.Config                       (EvalConfig (..),
 import           Ide.Plugin.Eval.GHC                          (addImport,
                                                                addPackages,
                                                                hasPackage,
-                                                               showDynFlags)
+                                                               setSessionAndInteractiveDynFlags)
 import           Ide.Plugin.Eval.Parse.Comments               (commentsToSections)
 import           Ide.Plugin.Eval.Parse.Option                 (parseSetFlags)
-import           Ide.Plugin.Eval.Rules                        (queueForEvaluation)
+import           Ide.Plugin.Eval.Rules                        (queueForEvaluation,
+                                                               unqueueForEvaluation)
 import           Ide.Plugin.Eval.Types
 import           Ide.Plugin.Eval.Util                         (gStrictTry,
                                                                isLiterate,
-                                                               logWith,
+                                                               prettyWarnings,
                                                                response', timed)
-import           Ide.PluginUtils                              (handleMaybe,
-                                                               handleMaybeM,
-                                                               pluginResponse)
 import           Ide.Types
+import qualified Language.LSP.Protocol.Lens                   as L
+import           Language.LSP.Protocol.Message
+import           Language.LSP.Protocol.Types
 import           Language.LSP.Server
-import           Language.LSP.Types                           hiding
-                                                              (SemanticTokenAbsolute (length, line),
-                                                               SemanticTokenRelative (length))
-import           Language.LSP.Types.Lens                      (end, line)
-import           Language.LSP.VFS                             (virtualFileText)
 
 {- | Code Lens provider
  NOTE: Invoked every time the document is modified, not just when the document is saved.
 -}
-codeLens :: PluginMethodHandler IdeState TextDocumentCodeLens
-codeLens st plId CodeLensParams{_textDocument} =
-    let dbg = logWith st
-        perf = timed dbg
+codeLens :: Recorder (WithPriority Log) -> PluginMethodHandler IdeState Method_TextDocumentCodeLens
+codeLens recorder st plId CodeLensParams{_textDocument} =
+    let dbg = logWith recorder Debug
+        perf = timed (\lbl duration -> dbg $ LogExecutionTime lbl duration)
      in perf "codeLens" $
-            pluginResponse $ do
+            do
                 let TextDocumentIdentifier uri = _textDocument
-                fp <- handleMaybe "uri" $ uriToFilePath' uri
+                fp <- uriToFilePathE uri
                 let nfp = toNormalizedFilePath' fp
                     isLHS = isLiterate fp
-                dbg "fp" fp
-                (comments, _) <- liftIO $
-                    runAction "eval.GetParsedModuleWithComments" st $ useWithStale_ GetEvalComments nfp
-                -- dbg "excluded comments" $ show $  DL.toList $
-                --     foldMap (\(L a b) ->
-                --         case b of
-                --             AnnLineComment{}  -> mempty
-                --             AnnBlockComment{} -> mempty
-                --             _                 -> DL.singleton (a, b)
-                --     )
-                --     $ apiAnnComments' pm_annotations
-                dbg "comments" $ show comments
+                dbg $ LogCodeLensFp fp
+                (comments, _) <-
+                    runActionE "eval.GetParsedModuleWithComments" st $ useWithStaleE GetEvalComments nfp
+                dbg $ LogCodeLensComments comments
 
                 -- Extract tests from source code
                 let Sections{..} = commentsToSections isLHS comments
@@ -171,7 +152,7 @@ codeLens st plId CodeLensParams{_textDocument} =
                               args = EvalParams (setupSections ++ [section]) _textDocument ident
                               cmd' =
                                 (cmd :: Command)
-                                    { _arguments = Just (List [toJSON args])
+                                    { _arguments = Just [toJSON args]
                                     , _title =
                                         if trivial resultRange
                                             then "Evaluate..."
@@ -180,50 +161,48 @@ codeLens st plId CodeLensParams{_textDocument} =
                         ]
 
                 perf "tests" $
-                    dbg "Tests" $
-                        unwords
-                            [ show (length tests)
-                            , "tests in"
-                            , show (length nonSetupSections)
-                            , "sections"
-                            , show (length setupSections)
-                            , "setups"
-                            , show (length lenses)
-                            , "lenses."
-                            ]
+                    dbg $ LogTests
+                            (length tests)
+                            (length nonSetupSections)
+                            (length setupSections)
+                            (length lenses)
 
-                return $ List lenses
+                return $ InL lenses
   where
     trivial (Range p p') = p == p'
 
 evalCommandName :: CommandId
 evalCommandName = "evalCommand"
 
-evalCommand :: PluginId -> PluginCommand IdeState
-evalCommand plId = PluginCommand evalCommandName "evaluate" (runEvalCmd plId)
+evalCommand :: Recorder (WithPriority Log) -> PluginId -> PluginCommand IdeState
+evalCommand recorder plId = PluginCommand evalCommandName "evaluate" (runEvalCmd recorder plId)
 
 type EvalId = Int
 
-runEvalCmd :: PluginId -> CommandFunction IdeState EvalParams
-runEvalCmd plId st EvalParams{..} =
-    let dbg = logWith st
-        perf = timed dbg
-        cmd :: ExceptT String (LspM Config) WorkspaceEdit
+runEvalCmd :: Recorder (WithPriority Log) -> PluginId -> CommandFunction IdeState EvalParams
+runEvalCmd recorder plId st mtoken EvalParams{..} =
+    let dbg = logWith recorder Debug
+        perf = timed (\lbl duration -> dbg $ LogExecutionTime lbl duration)
+        cmd :: ExceptT PluginError (HandlerM Config) WorkspaceEdit
         cmd = do
             let tests = map (\(a,_,b) -> (a,b)) $ testsBySection sections
 
             let TextDocumentIdentifier{_uri} = module_
-            fp <- handleMaybe "uri" $ uriToFilePath' _uri
+            fp <- uriToFilePathE _uri
             let nfp = toNormalizedFilePath' fp
-            mdlText <- moduleText _uri
+            mdlText <- moduleText st _uri
 
             -- enable codegen for the module which we need to evaluate.
-            liftIO $ queueForEvaluation st nfp
-            liftIO $ setSomethingModified VFSUnmodified st [toKey NeedsCompilation nfp] "Eval"
-            -- Setup a session with linkables for all dependencies and GHCi specific options
-            final_hscEnv <- liftIO $ initialiseSessionForEval
-                                      (needsQuickCheck tests)
-                                      st nfp
+            final_hscEnv <- liftIO $ bracket_
+              (setSomethingModified VFSUnmodified st "Eval" $ do
+                queueForEvaluation st nfp
+                return [toKey IsEvaluating nfp]
+                )
+              (setSomethingModified VFSUnmodified st "Eval" $ do
+                unqueueForEvaluation st nfp
+                return [toKey IsEvaluating nfp]
+                )
+              (initialiseSessionForEval (needsQuickCheck tests) st nfp)
 
             evalCfg <- liftIO $ runAction "eval: config" st $ getEvalConfig plId
 
@@ -232,15 +211,15 @@ runEvalCmd plId st EvalParams{..} =
                 perf "edits" $
                     liftIO $
                         evalGhcEnv final_hscEnv $ do
-                            runTests evalCfg (st, fp) tests
+                            runTests recorder evalCfg fp tests
 
-            let workspaceEditsMap = HashMap.fromList [(_uri, List $ addFinalReturn mdlText edits)]
+            let workspaceEditsMap = Map.singleton _uri (addFinalReturn mdlText edits)
             let workspaceEdits = WorkspaceEdit (Just workspaceEditsMap) Nothing Nothing
 
             return workspaceEdits
-     in perf "evalCmd" $
-            withIndefiniteProgress "Evaluating" Cancellable $
-                response' cmd
+     in perf "evalCmd" $ ExceptT $
+            pluginWithIndefiniteProgress "Evaluating" mtoken Cancellable $ \_updater ->
+                runExceptT $ response' cmd
 
 -- | Create an HscEnv which is suitable for performing interactive evaluation.
 -- All necessary home modules will have linkables and the current module will
@@ -254,8 +233,8 @@ initialiseSessionForEval needs_quickcheck st nfp = do
     ms <- msrModSummary <$> use_ GetModSummary nfp
     deps_hsc <- hscEnv <$> use_ GhcSessionDeps nfp
 
-    linkables_needed <- reachableModules <$> use_ GetDependencyInformation nfp
-    linkables <- uses_ GetLinkable linkables_needed
+    linkables_needed <- transitiveDeps <$> useNoFile_ GetModuleGraph <*> pure nfp
+    linkables <- uses_ GetLinkable (nfp : maybe [] transitiveModuleDeps linkables_needed)
     -- We unset the global rdr env in mi_globals when we generate interfaces
     -- See Note [Clearing mi_globals after generating an iface]
     -- However, the eval plugin (setContext specifically) requires the rdr_env
@@ -266,18 +245,24 @@ initialiseSessionForEval needs_quickcheck st nfp = do
         addRdrEnv hmi
           | iface <- hm_iface hmi
           , ms_mod ms == mi_module iface
-          = hmi { hm_iface = iface { mi_globals = Just rdr_env } }
+          = hmi { hm_iface = iface { mi_globals = Just $!
+#if MIN_VERSION_ghc(9,8,0)
+                    forceGlobalRdrEnv
+#endif
+                      rdr_env
+                }}
           | otherwise = hmi
 
     return (ms, linkable_hsc)
   -- Bit awkward we need to use evalGhcEnv here but setContext requires to run
   -- in the Ghc monad
-  env2 <- evalGhcEnv env1 $ do
+  env2 <- liftIO $ evalGhcEnv env1 $ do
             setContext [Compat.IIModule (moduleName (ms_mod ms))]
             let df = flip xopt_set    LangExt.ExtendedDefaultRules
                    . flip xopt_unset  LangExt.MonomorphismRestriction
                    . flip gopt_set    Opt_ImplicitImportQualified
                    . flip gopt_unset  Opt_DiagnosticsShowCaret
+                   . setBackend ghciBackend
                    $ (ms_hspp_opts ms) {
                         useColor = Never
                       , canUseColor = False }
@@ -300,12 +285,15 @@ finalReturn txt =
         p = Position l c
      in TextEdit (Range p p) "\n"
 
-moduleText :: (IsString e, MonadLsp c m) => Uri -> ExceptT e m Text
-moduleText uri =
-    handleMaybeM "mdlText" $
-      (virtualFileText <$>)
-          <$> getVirtualFile
-              (toNormalizedUri uri)
+moduleText :: IdeState -> Uri -> ExceptT PluginError (HandlerM config) Text
+moduleText state uri = do
+    contents <-
+        handleMaybeM (PluginInternalError "mdlText") $
+            liftIO $
+                runAction "eval.getUriContents" state $
+                    getUriContents $
+                        toNormalizedUri uri
+    pure $ Rope.toText contents
 
 testsBySection :: [Section] -> [(Section, EvalId, Test)]
 testsBySection sections =
@@ -314,7 +302,7 @@ testsBySection sections =
     , test <- sectionTests section
     ]
 
-type TEnv = (IdeState, String)
+type TEnv = String
 -- |GHC declarations required for expression evaluation
 evalSetup :: Ghc ()
 evalSetup = do
@@ -322,26 +310,26 @@ evalSetup = do
     context <- getContext
     setContext (IIDecl preludeAsP : context)
 
-runTests :: EvalConfig -> TEnv -> [(Section, Test)] -> Ghc [TextEdit]
-runTests EvalConfig{..} e@(_st, _) tests = do
+runTests :: Recorder (WithPriority Log) -> EvalConfig -> TEnv -> [(Section, Test)] -> Ghc [TextEdit]
+runTests recorder EvalConfig{..} e tests = do
     df <- getInteractiveDynFlags
     evalSetup
-    when (hasQuickCheck df && needsQuickCheck tests) $ void $ evals True e df propSetup
+    when (hasQuickCheck df && needsQuickCheck tests) $ void $ evals recorder True e df propSetup
 
     mapM (processTest e df) tests
   where
     processTest :: TEnv -> DynFlags -> (Section, Test) -> Ghc TextEdit
-    processTest e@(st, fp) df (section, test) = do
-        let dbg = logWith st
+    processTest fp df (section, test) = do
+        let dbg = logWith recorder Debug
         let pad = pad_ $ (if isLiterate fp then ("> " `T.append`) else id) $ padPrefix (sectionFormat section)
         rs <- runTest e df test
-        dbg "TEST RESULTS" rs
+        dbg $ LogRunTestResults rs
 
         let checkedResult = testCheck eval_cfg_diff (section, test) rs
         let resultLines = concatMap T.lines checkedResult
 
         let edit = asEdit (sectionFormat section) test (map pad resultLines)
-        dbg "TEST EDIT" edit
+        dbg $ LogRunTestEdits edit
         return edit
 
     -- runTest :: String -> DynFlags -> Loc Test -> Ghc [Text]
@@ -350,23 +338,23 @@ runTests EvalConfig{..} e@(_st, _) tests = do
             return $
                 singleLine
                     "Add QuickCheck to your cabal dependencies to run this test."
-    runTest e df test = evals (eval_cfg_exception && not (isProperty test)) e df (asStatements test)
+    runTest e df test = evals recorder (eval_cfg_exception && not (isProperty test)) e df (asStatements test)
 
 asEdit :: Format -> Test -> [Text] -> TextEdit
 asEdit (MultiLine commRange) test resultLines
     -- A test in a block comment, ending with @-\}@ without newline in-between.
-    | testRange test ^. end.line == commRange ^. end . line
+    | testRange test ^. L.end . L.line == commRange ^. L.end . L.line
     =
     TextEdit
         (Range
-            (testRange test ^. end)
-            (resultRange test ^. end)
+            (testRange test ^. L.end)
+            (resultRange test ^. L.end)
         )
         ("\n" <> T.unlines (resultLines <> ["-}"]))
 asEdit _ test resultLines =
     TextEdit (resultRange test) (T.unlines resultLines)
 
-{-
+{- |
 The result of evaluating a test line can be:
 * a value
 * nothing
@@ -426,45 +414,41 @@ Or for a value that does not have a Show instance and can therefore not be displ
 >>> V
 No instance for (Show V) arising from a use of ‘evalPrint’
 -}
-evals :: Bool -> TEnv -> DynFlags -> [Statement] -> Ghc [Text]
-evals mark_exception (st, fp) df stmts = do
+evals :: Recorder (WithPriority Log) -> Bool -> TEnv -> DynFlags -> [Statement] -> Ghc [Text]
+evals recorder mark_exception fp df stmts = do
     er <- gStrictTry $ mapM eval stmts
     return $ case er of
         Left err -> errorLines err
         Right rs -> concat . catMaybes $ rs
   where
-    dbg = logWith st
+    dbg = logWith recorder Debug
     eval :: Statement -> Ghc (Maybe [Text])
     eval (Located l stmt)
         | -- GHCi flags
           Just (words -> flags) <- parseSetFlags stmt = do
-            dbg "{:SET" flags
+            dbg $ LogEvalFlags flags
             ndf <- getInteractiveDynFlags
-            dbg "pre set" $ showDynFlags ndf
+            dbg $ LogEvalPreSetDynFlags ndf
             eans <-
                 liftIO $ try @GhcException $
                 parseDynamicFlagsCmdLine ndf
                 (map (L $ UnhelpfulSpan unhelpfulReason) flags)
-            dbg "parsed flags" $ eans
-              <&> (_1 %~ showDynFlags >>> _3 %~ map warnMsg)
+            dbg $ LogEvalParsedFlags eans
             case eans of
                 Left err -> pure $ Just $ errorLines $ show err
                 Right (df', ignoreds, warns) -> do
                     let warnings = do
                             guard $ not $ null warns
                             pure $ errorLines $
-                                unlines $
-                                map prettyWarn warns
+                                prettyWarnings warns
                         igns = do
                             guard $ not $ null ignoreds
                             pure
                                 ["Some flags have not been recognized: "
                                 <> T.pack (intercalate ", " $ map SrcLoc.unLoc ignoreds)
                                 ]
-                    dbg "post set" $ showDynFlags df'
-                    _ <- setSessionDynFlags df'
-                    sessDyns <- getSessionDynFlags
-                    setInteractiveDynFlags sessDyns
+                    dbg $ LogEvalPostSetDynFlags df'
+                    setSessionAndInteractiveDynFlags df'
                     pure $ warnings <> igns
         | -- A type/kind command
           Just (cmd, arg) <- parseGhciLikeCmd $ T.pack stmt =
@@ -472,39 +456,30 @@ evals mark_exception (st, fp) df stmts = do
         | -- A statement
           isStmt pf stmt =
             do
-                dbg "{STMT " stmt
+                dbg $ LogEvalStmtStart stmt
                 res <- exec stmt l
                 let r = case res of
                         Left err -> Just . (if mark_exception then exceptionLines else errorLines) $ err
                         Right x  -> singleLine <$> x
-                dbg "STMT} -> " r
+                dbg $ LogEvalStmtResult r
                 return r
         | -- An import
           isImport pf stmt =
             do
-                dbg "{IMPORT " stmt
+                dbg $ LogEvalImport stmt
                 _ <- addImport stmt
                 return Nothing
         | -- A declaration
           otherwise =
             do
-                dbg "{DECL " stmt
+                dbg $ LogEvalDeclaration stmt
                 void $ runDecls stmt
                 return Nothing
     pf = initParserOpts df
-#if !MIN_VERSION_ghc(9,0,0)
-    unhelpfulReason = "<interactive>"
-#else
     unhelpfulReason = UnhelpfulInteractive
-#endif
     exec stmt l =
         let opts = execOptions{execSourceFile = fp, execLineNumber = l}
          in myExecStmt stmt opts
-
-prettyWarn :: Warn -> String
-prettyWarn Warn{..} =
-    T.unpack (printOutputable $ SrcLoc.getLoc warnMsg) <> ": warning:\n"
-    <> "    " <> SrcLoc.unLoc warnMsg
 
 needsQuickCheck :: [(Section, Test)] -> Bool
 needsQuickCheck = any (isProperty . snd)
@@ -655,9 +630,6 @@ doTypeCmd dflags arg = do
 
 parseExprMode :: Text -> (TcRnExprMode, T.Text)
 parseExprMode rawArg = case T.break isSpace rawArg of
-#if !MIN_VERSION_ghc(9,2,0)
-    ("+v", rest) -> (TM_NoInst, T.strip rest)
-#endif
     ("+d", rest) -> (TM_Default, T.strip rest)
     _            -> (TM_Inst, rawArg)
 
@@ -685,4 +657,3 @@ parseGhciLikeCmd :: Text -> Maybe (Text, Text)
 parseGhciLikeCmd input = do
     (':', rest) <- T.uncons $ T.stripStart input
     pure $ second T.strip $ T.break isSpace rest
-

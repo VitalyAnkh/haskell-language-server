@@ -12,18 +12,19 @@ pwd
 env
 
 # ensure ghcup
-if ! command -v ghcup ; then
-	install_ghcup
-fi
+install_ghcup
 
 # ensure cabal-cache
 download_cabal_cache "$HOME/.local/bin/cabal-cache"
 
 
 # build
-ecabal update
 ghcup install ghc "${GHC_VERSION}"
 ghcup set ghc "${GHC_VERSION}"
+sed -i.bak -e '/DELETE MARKER FOR CI/,/END DELETE/d' cabal.project # see comment in cabal.project
+ecabal update
+ecabal user-config diff
+ecabal user-config init -f
 "ghc-${GHC_VERSION}" --info
 "ghc" --info
 
@@ -32,6 +33,10 @@ mkdir -p "$CI_PROJECT_DIR/out/plan.json"
 
 case "$(uname)" in
     MSYS_*|MINGW*)
+    # cat "C:\Users\runneradmin\AppData\Roaming\cabal\config"
+    # sed -ic "/extra-include-dirs/d" "C:\Users\runneradmin\AppData\Roaming\cabal\config"
+    # sed -ic "/extra-lib-dirs/d" "C:\Users\runneradmin\AppData\Roaming\cabal\config"
+    cat "C:\Users\runneradmin\AppData\Roaming\cabal\config"
 		args=( -O2 -w "ghc-$GHC_VERSION" --project-file cabal.project --disable-profiling --disable-tests --enable-executable-stripping ${ADD_CABAL_ARGS})
 
 		# Shorten binary names
@@ -52,7 +57,6 @@ case "$(uname)" in
 		cp "$(cabal list-bin -v0 ${args[@]} exe:hls-wrapper)" "$CI_PROJECT_DIR/out/${ARTIFACT}/haskell-language-server-wrapper${ext}"
         ;;
 	*)
-		sed -i.bak -e '/DELETE MARKER FOR CI/,/END DELETE/d' cabal.project # see comment in cabal.project
 		emake --version
 		emake GHCUP=ghcup CABAL_CACHE_BIN=cabal-cache.sh S3_HOST="${S3_HOST}" S3_KEY="${ARTIFACT}" GHC_VERSION="${GHC_VERSION}" hls-ghc
         ;;

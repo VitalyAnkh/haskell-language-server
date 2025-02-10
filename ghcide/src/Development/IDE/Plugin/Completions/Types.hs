@@ -1,9 +1,9 @@
+{-# LANGUAGE CPP                #-}
 {-# LANGUAGE DeriveAnyClass     #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GADTs              #-}
 {-# LANGUAGE OverloadedLabels   #-}
 {-# LANGUAGE TypeFamilies       #-}
-{-# LANGUAGE CPP                #-}
 module Development.IDE.Plugin.Completions.Types (
   module Development.IDE.Plugin.Completions.Types
 ) where
@@ -19,16 +19,12 @@ import           Data.Text                    (Text)
 import           Data.Typeable                (Typeable)
 import           Development.IDE.GHC.Compat
 import           Development.IDE.Graph        (RuleResult)
-import           Development.IDE.Spans.Common
+import           Development.IDE.Spans.Common ()
 import           GHC.Generics                 (Generic)
+import qualified GHC.Types.Name.Occurrence    as Occ
 import           Ide.Plugin.Properties
-import           Language.LSP.Types           (CompletionItemKind (..), Uri)
-import qualified Language.LSP.Types           as J
-#if MIN_VERSION_ghc(9,0,0)
-import qualified GHC.Types.Name.Occurrence as Occ
-#else
-import qualified OccName as Occ
-#endif
+import           Language.LSP.Protocol.Types  (CompletionItemKind (..), Uri)
+import qualified Language.LSP.Protocol.Types  as J
 
 -- | Produce completions info for a file
 type instance RuleResult LocalCompletions = CachedCompletions
@@ -53,8 +49,8 @@ extendImportCommandId :: Text
 extendImportCommandId = "extendImport"
 
 properties :: Properties
-  '[ 'PropertyKey "autoExtendOn" 'TBoolean,
-     'PropertyKey "snippetsOn" 'TBoolean]
+  '[ 'PropertyKey "autoExtendOn" TBoolean,
+     'PropertyKey "snippetsOn" TBoolean]
 properties = emptyProperties
   & defineBooleanProperty #snippetsOn
     "Inserts snippets when using code completions"
@@ -178,7 +174,7 @@ parseNs (String "v") = pure Occ.varName
 parseNs (String "c") = pure dataName
 parseNs (String "t") = pure tcClsName
 parseNs (String "z") = pure tvName
-parseNs _ = mempty
+parseNs _            = mempty
 
 instance FromJSON NameDetails where
   parseJSON v@(Array _)
@@ -200,13 +196,13 @@ instance ToJSON NameDetails where
 instance Show NameDetails where
   show = show . toJSON
 
--- | The data that is acutally sent for resolve support
+-- | The data that is actually sent for resolve support
 -- We need the URI to be able to reconstruct the GHC environment
 -- in the file the completion was triggered in.
 data CompletionResolveData = CompletionResolveData
-  { itemFile :: Uri
+  { itemFile      :: Uri
   , itemNeedsType :: Bool -- ^ Do we need to lookup a type for this item?
-  , itemName :: NameDetails
+  , itemName      :: NameDetails
   }
   deriving stock Generic
   deriving anyclass (FromJSON, ToJSON)

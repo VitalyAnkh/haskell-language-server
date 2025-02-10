@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds         #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main where
@@ -34,37 +35,50 @@ tests = testGroup "Explicit fixity"
     , hoverTest "(<|>)" (Position 21 8) "infixl 3 `<|>`"
     , hoverTest "fixity define" (Position 23 11) "infixr 7 `>>:`"
     , hoverTest "record" (Position 28 10) "infix 9 `>>::`"
-    , hoverTest "wildcards" (Position 30 5) "infixr 7 `>>:`  \n  \ninfix 9 `>>::`"
+    , hoverTest "wildcards1" (Position 30 5) "infixr 7 `>>:`"
+    , hoverTest "wildcards2" (Position 30 5) "infix 9 `>>::`"
     , hoverTest "function" (Position 32 11) "infixl 1 `f`"
     , hoverTest "signature" (Position 35 2) "infixr 9 `>>>:`"
     , hoverTest "operator" (Position 36 2) "infixr 9 `>>>:`"
     , hoverTest "escape" (Position 39 2) "infixl 3 `~\\:`"
-    -- Ensure that there is no one extra new line in import statement
-    , expectFail $ hoverTest "import" (Position 2 18) "Control.Monad***"
-    -- Known issue, See https://github.com/haskell/haskell-language-server/pull/2973/files#r916535742
-    , expectFail $ hoverTestImport "import" (Position 4 7) "infixr 9 `>>>:`"
+    -- TODO: Ensure that there is no one extra new line in import statement
+    , hoverTestExpectFail
+        "import"
+        (Position 2 18)
+        (BrokenIdeal "Control.Monad***")
+        (BrokenCurrent "Control.Monad\n\n")
+    , hoverTestImport "import" (Position 4 7) "infixr 9 `>>>:`"
     ]
 
 hoverTest :: TestName -> Position -> T.Text -> TestTree
 hoverTest = hoverTest' "Hover.hs"
+
 hoverTestImport :: TestName -> Position -> T.Text -> TestTree
 hoverTestImport = hoverTest' "HoverImport.hs"
 
+hoverTestExpectFail
+  :: TestName
+  -> Position
+  -> ExpectBroken 'Ideal T.Text
+  -> ExpectBroken 'Current T.Text
+  -> TestTree
+hoverTestExpectFail title pos _ =
+  hoverTest title pos . unCurrent
+
 hoverTest' :: String -> TestName -> Position -> T.Text -> TestTree
-hoverTest' docName title pos expected = testCase title $ runSessionWithServer plugin testDataDir $ do
+hoverTest' docName title pos expected = testCase title $ runSessionWithServer def plugin testDataDir $ do
     doc <- openDoc docName "haskell"
     waitForKickDone
     h <- getHover doc pos
-    let expected' = "\n" <> sectionSeparator <> expected
     case h of
         Nothing -> liftIO $ assertFailure "No hover"
         Just (Hover contents _) -> case contents of
-          HoverContentsMS _ -> liftIO $ assertFailure "Unexpected content type"
-          HoverContents (MarkupContent mk txt) -> do
+          InL (MarkupContent _ txt) -> do
               liftIO
                 $ assertBool ("Failed to find `" <> T.unpack expected <> "` in hover message: " <> T.unpack txt)
                 $ expected `T.isInfixOf` txt
+          _ -> liftIO $ assertFailure "Unexpected content type"
     closeDoc doc
 
 testDataDir :: FilePath
-testDataDir = "test" </> "testdata"
+testDataDir = "plugins" </> "hls-explicit-fixity-plugin" </> "test" </> "testdata"

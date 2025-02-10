@@ -43,6 +43,7 @@ CP        := cp
 # by default don't run ghcup
 GHCUP       ?= echo
 GHCUP_GC    ?= $(GHCUP) gc
+GHCUP_RM    ?= $(GHCUP) rm
 
 CABAL_CACHE_BIN ?= echo
 
@@ -59,7 +60,7 @@ BINDIST_BASE_DIR := out/bindist/$(ARTIFACT)
 BINDIST_OUT_DIR  := $(BINDIST_BASE_DIR)/haskell-language-server-$(HLS_VERSION)
 
 CABAL_BASE_ARGS         ?= --store-dir=$(ROOT_DIR)/$(STORE_DIR)
-CABAL_ARGS              ?= --disable-tests --disable-profiling -O2
+CABAL_ARGS              ?= --disable-tests --disable-profiling -O2 $(ADD_CABAL_ARGS)
 CABAL_INSTALL_ARGS      ?= --overwrite-policy=always --install-method=copy
 CABAL_INSTALL           := $(CABAL) $(CABAL_BASE_ARGS) v2-install
 PROJECT_FILE            := cabal.project
@@ -87,7 +88,8 @@ hls:
 	for ghc in $(GHCS) ; do \
 		$(GHCUP) install ghc `echo $$ghc` && \
 		$(GHCUP_GC) -p -s -c -t && \
-		$(MAKE) GHC_VERSION=`echo $$ghc` hls-ghc || exit 1 ; \
+		$(MAKE) GHC_VERSION=`echo $$ghc` hls-ghc || exit 1 && \
+		$(GHCUP_RM) `echo $$ghc` ; \
 	done
 
 hls-ghc:
@@ -108,7 +110,8 @@ bindist:
 	for ghc in $(GHCS) ; do \
 		$(GHCUP) install ghc `echo $$ghc` && \
 		$(GHCUP_GC) -p -s -c -t && \
-		$(MAKE) GHC_VERSION=`echo $$ghc` bindist-ghc || exit 1 ; \
+		$(MAKE) GHC_VERSION=`echo $$ghc` bindist-ghc || exit 1 && \
+		$(GHCUP_RM) `echo $$ghc` ; \
 	done
 	$(SED) -e "s/@@HLS_VERSION@@/$(HLS_VERSION)/" \
 		bindist/GNUmakefile.in > "$(BINDIST_OUT_DIR)/GNUmakefile"
