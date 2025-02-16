@@ -17,11 +17,12 @@ on:
 jobs:
   pre_job:
     runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.labels.*.name, 'performance')
     outputs:
       should_skip: ${{ steps.skip_check.outputs.should_skip }}
     steps:
       - id: skip_check
-        uses: fkirc/skip-duplicate-actions@v5.3.0
+        uses: fkirc/skip-duplicate-actions@v5.3.1
         with:
           cancel_others: false
           paths_ignore: '[ "**/docs/**"
@@ -46,9 +47,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # benching the two latest GHCs we support now
+        # since benchmark are expansive.
+        # choosing the two latest are easier to maintain and more forward looking
+        # see discussion https://github.com/haskell/haskell-language-server/pull/4118
+        # also possible to add more GHCs if we performs better in the future.
         ghc:
-          - '8.10.7'
-          - '9.2.5'
+          - '9.6'
+          - '9.8'
         os:
           - ubuntu-latest
 
@@ -115,13 +121,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ghc: ['8.10.7', '9.2.5']
+        ghc: ['9.6', '9.8']
         os: [ubuntu-latest]
-        cabal: ['3.6']
+        cabal: ['3.10']
         example: ['cabal', 'lsp-types']
 
     steps:
-    - uses: haskell/actions/setup@v2.3.6
+    - uses: haskell-actions/setup@v2.7.9
       with:
         ghc-version  : ${{ matrix.ghc   }}
         cabal-version: ${{ matrix.cabal }}
@@ -151,6 +157,9 @@ jobs:
     - name: Display results
       run: |
         column -s, -t < bench-results/unprofiled/${{ matrix.example }}/results.csv | tee bench-results/unprofiled/${{ matrix.example }}/results.txt
+        echo
+        echo "Performance Diff(comparing to its previous Version):"
+        column -s, -t < bench-results/unprofiled/${{ matrix.example }}/resultDiff.csv | tee bench-results/unprofiled/${{ matrix.example }}/resultDiff.txt
 
     - name: tar benchmarking artifacts
       run:  find bench-results -name "*.csv" -or -name "*.svg" -or -name "*.html" | xargs tar -czf benchmark-artifacts.tar.gz

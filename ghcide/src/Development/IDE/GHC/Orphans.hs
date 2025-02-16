@@ -1,54 +1,46 @@
 -- Copyright (c) 2019 The DAML Authors. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
-{-# LANGUAGE CPP               #-}
-{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE CPP #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Orphan instances for GHC.
 --   Note that the 'NFData' instances may not be law abiding.
 module Development.IDE.GHC.Orphans() where
-
-#if MIN_VERSION_ghc(9,2,0)
-import           GHC.Parser.Annotation
-#endif
-#if MIN_VERSION_ghc(9,0,0)
-import           GHC.Data.Bag
-import           GHC.Data.FastString
-import qualified GHC.Data.StringBuffer      as SB
-import           GHC.Types.Name.Occurrence
-import           GHC.Types.SrcLoc
-import           GHC.Types.Unique           (getKey)
-import           GHC.Unit.Info
-import           GHC.Utils.Outputable
-#else
-import           Bag
-import           GhcPlugins
-import qualified StringBuffer               as SB
-import           Unique                     (getKey)
-#endif
-
-
-import           Development.IDE.GHC.Compat
+import           Development.IDE.GHC.Compat        hiding
+                                                   (DuplicateRecordFields,
+                                                    FieldSelectors)
 import           Development.IDE.GHC.Util
 
 import           Control.DeepSeq
+import           Control.Monad.Trans.Reader        (ReaderT (..))
 import           Data.Aeson
-import           Data.Bifunctor             (Bifunctor (..))
 import           Data.Hashable
-import           Data.String                (IsString (fromString))
-import           Data.Text                  (unpack)
-#if MIN_VERSION_ghc(9,0,0)
+import           Data.String                       (IsString (fromString))
+import           Data.Text                         (unpack)
+
+import           Data.Bifunctor                    (Bifunctor (..))
 import           GHC.ByteCode.Types
-#else
-import           ByteCodeTypes
-#endif
-#if MIN_VERSION_ghc(9,3,0)
+import           GHC.Data.Bag
+import           GHC.Data.FastString
+import qualified GHC.Data.StringBuffer             as SB
+import           GHC.Parser.Annotation
+import           GHC.Types.FieldLabel              (DuplicateRecordFields (DuplicateRecordFields, NoDuplicateRecordFields),
+                                                    FieldSelectors (FieldSelectors, NoFieldSelectors))
 import           GHC.Types.PkgQual
-#endif
+import           GHC.Types.SrcLoc
+
+-- See Note [Guidelines For Using CPP In GHCIDE Import Statements]
+
 #if MIN_VERSION_ghc(9,5,0)
 import           GHC.Unit.Home.ModInfo
+import           GHC.Unit.Module.Location          (ModLocation (..))
+import           GHC.Unit.Module.WholeCoreBindings
 #endif
+
+-- Orphan instance for Shake.hs
+-- https://hub.darcs.net/ross/transformers/issue/86
+deriving instance (Semigroup (m a)) => Semigroup (ReaderT r m a)
 
 -- Orphan instances for types from the GHC API.
 instance Show CoreModule where show = unpack . printOutputable
@@ -61,39 +53,35 @@ instance NFData SafeHaskellMode where rnf = rwhnf
 instance Show Linkable where show = unpack . printOutputable
 instance NFData Linkable where rnf (LM a b c) = rnf a `seq` rnf b `seq` rnf c
 instance NFData Unlinked where
-  rnf (DotO f)   = rnf f
-  rnf (DotA f)   = rnf f
-  rnf (DotDLL f) = rnf f
-  rnf (BCOs a b) = seqCompiledByteCode a `seq` liftRnf rwhnf b
+  rnf (DotO f)           = rnf f
+  rnf (DotA f)           = rnf f
+  rnf (DotDLL f)         = rnf f
+  rnf (BCOs a b)         = seqCompiledByteCode a `seq` liftRnf rwhnf b
+#if MIN_VERSION_ghc(9,5,0)
+  rnf (CoreBindings wcb) = rnf wcb
+  rnf (LoadedBCOs us)    = rnf us
+
+instance NFData WholeCoreBindings where
+  rnf (WholeCoreBindings bs m ml) = rnf bs `seq` rnf m `seq` rnf ml
+
+instance NFData ModLocation where
+    rnf (ModLocation mf f1 f2 f3 f4 f5) = rnf mf `seq` rnf f1 `seq` rnf f2 `seq` rnf f3 `seq` rnf f4 `seq` rnf f5
+
+#endif
+
 instance Show PackageFlag where show = unpack . printOutputable
 instance Show InteractiveImport where show = unpack . printOutputable
 instance Show PackageName  where show = unpack . printOutputable
 
-#if !MIN_VERSION_ghc(9,0,1)
-instance Show ComponentId  where show = unpack . printOutputable
-instance Show SourcePackageId  where show = unpack . printOutputable
-
-instance Show GhcPlugins.InstalledUnitId where
-    show = installedUnitIdString
-
-instance NFData GhcPlugins.InstalledUnitId where rnf = rwhnf . installedUnitIdFS
-
-instance Hashable GhcPlugins.InstalledUnitId where
-  hashWithSalt salt = hashWithSalt salt . installedUnitIdString
-#else
 instance Show UnitId where show = unpack . printOutputable
 deriving instance Ord SrcSpan
 deriving instance Ord UnhelpfulSpanReason
-#endif
 
 instance NFData SB.StringBuffer where rnf = rwhnf
 
 instance Show Module where
     show = moduleNameString . moduleName
 
-#if !MIN_VERSION_ghc(9,3,0)
-instance Outputable a => Show (GenLocated SrcSpan a) where show = unpack . printOutputable
-#endif
 
 #if !MIN_VERSION_ghc(9,5,0)
 instance (NFData l, NFData e) => NFData (GenLocated l e) where
@@ -109,18 +97,21 @@ instance Show ParsedModule where
 instance NFData ModSummary where
     rnf = rwhnf
 
-#if MIN_VERSION_ghc(9,2,0)
 instance Ord FastString where
     compare a b = if a == b then EQ else compare (fs_sbs a) (fs_sbs b)
 
+
+#if MIN_VERSION_ghc(9,9,0)
+instance NFData (EpAnn a) where
+  rnf = rwhnf
+#else
 instance NFData (SrcSpanAnn' a) where
     rnf = rwhnf
-
-instance Bifunctor (GenLocated) where
-    bimap f g (L l x) = L (f l) (g x)
-
 deriving instance Functor SrcSpanAnn'
 #endif
+
+instance Bifunctor GenLocated where
+    bimap f g (L l x) = L (f l) (g x)
 
 instance NFData ParsedModule where
     rnf = rwhnf
@@ -131,17 +122,7 @@ instance Show HieFile where
 instance NFData HieFile where
     rnf = rwhnf
 
-#if !MIN_VERSION_ghc(9,3,0)
-deriving instance Eq SourceModified
-deriving instance Show SourceModified
-instance NFData SourceModified where
-    rnf = rwhnf
-#endif
 
-#if !MIN_VERSION_ghc(9,2,0)
-instance Show ModuleName where
-    show = moduleNameString
-#endif
 instance Hashable ModuleName where
     hashWithSalt salt = hashWithSalt salt . show
 
@@ -204,22 +185,28 @@ instance NFData (ImportDecl GhcPs) where
 
 #if MIN_VERSION_ghc(9,5,0)
 instance (NFData (HsModule a)) where
-#elif MIN_VERSION_ghc(9,0,1)
-instance (NFData HsModule) where
 #else
-instance (NFData (HsModule a)) where
+instance (NFData HsModule) where
 #endif
   rnf = rwhnf
 
 instance Show OccName where show = unpack . printOutputable
+
+
+#if MIN_VERSION_ghc(9,7,0)
+instance Hashable OccName where hashWithSalt s n = hashWithSalt s (getKey $ getUnique $ occNameFS n, getKey $ getUnique $ occNameSpace n)
+#else
 instance Hashable OccName where hashWithSalt s n = hashWithSalt s (getKey $ getUnique n)
+#endif
 
 instance Show HomeModInfo where show = show . mi_module . hm_iface
+
+instance Show ModuleGraph where show _ = "ModuleGraph {..}"
+instance NFData ModuleGraph where rnf = rwhnf
 
 instance NFData HomeModInfo where
   rnf (HomeModInfo iface dets link) = rwhnf iface `seq` rnf dets `seq` rnf link
 
-#if MIN_VERSION_ghc(9,3,0)
 instance NFData PkgQual where
   rnf NoPkgQual      = ()
   rnf (ThisPkg uid)  = rnf uid
@@ -230,9 +217,39 @@ instance NFData UnitId where
 
 instance NFData NodeKey where
   rnf = rwhnf
-#endif
 
 #if MIN_VERSION_ghc(9,5,0)
 instance NFData HomeModLinkable where
   rnf = rwhnf
+#endif
+
+instance NFData (HsExpr (GhcPass Renamed)) where
+    rnf = rwhnf
+
+instance NFData (Pat (GhcPass Renamed)) where
+    rnf = rwhnf
+
+instance NFData (HsExpr (GhcPass Typechecked)) where
+    rnf = rwhnf
+
+instance NFData (Pat (GhcPass Typechecked)) where
+    rnf = rwhnf
+
+instance NFData Extension where
+  rnf = rwhnf
+
+instance NFData (UniqFM Name [Name]) where
+  rnf (ufmToIntMap -> m) = rnf m
+
+#if !MIN_VERSION_ghc(9,5,0)
+instance NFData DuplicateRecordFields where
+  rnf DuplicateRecordFields   = ()
+  rnf NoDuplicateRecordFields = ()
+
+instance NFData FieldSelectors where
+  rnf FieldSelectors   = ()
+  rnf NoFieldSelectors = ()
+
+instance NFData FieldLabel where
+  rnf (FieldLabel a b c d) = rnf a `seq` rnf b `seq` rnf c `seq` rnf d
 #endif

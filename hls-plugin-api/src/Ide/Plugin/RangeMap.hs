@@ -1,9 +1,5 @@
-{-# LANGUAGE CPP                        #-}
-{-# LANGUAGE DeriveFoldable             #-}
-{-# LANGUAGE DeriveFunctor              #-}
-{-# LANGUAGE DeriveTraversable          #-}
-{-# LANGUAGE DerivingStrategies         #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE CPP                #-}
+{-# LANGUAGE DerivingStrategies #-}
 
 -- | A map that allows fast \"in-range\" filtering. 'RangeMap' is meant
 -- to be constructed once and cached as part of a Shake rule. If
@@ -17,16 +13,22 @@ module Ide.Plugin.RangeMap
     fromList,
     fromList',
     filterByRange,
+    elementsInRange,
   ) where
 
-import           Data.Bifunctor                           (first)
-import           Data.Foldable                            (foldl')
 import           Development.IDE.Graph.Classes            (NFData)
-import           Language.LSP.Types                       (Position,
-                                                           Range (Range),
-                                                           isSubrangeOf)
+
 #ifdef USE_FINGERTREE
+import           Data.Bifunctor                           (first)
 import qualified HaskellWorks.Data.IntervalMap.FingerTree as IM
+import           Language.LSP.Protocol.Types              (Position,
+                                                           Range (Range))
+#else
+import           Language.LSP.Protocol.Types              (Range, isSubrangeOf)
+#endif
+
+#if USE_FINGERTREE && !MIN_VERSION_base(4,20,0)
+import           Data.List                                (foldl')
 #endif
 
 -- | A map from code ranges to values.
@@ -64,6 +66,14 @@ filterByRange :: Range -> RangeMap a -> [a]
 filterByRange range = map snd . IM.dominators (rangeToInterval range) . unRangeMap
 #else
 filterByRange range = map snd . filter (isSubrangeOf range . fst) . unRangeMap
+#endif
+
+-- | Extracts all elements from a 'RangeMap' that fall within a given 'Range'.
+elementsInRange :: Range -> RangeMap a -> [a]
+#ifdef USE_FINGERTREE
+elementsInRange range = map snd . IM.intersections (rangeToInterval range) . unRangeMap
+#else
+elementsInRange range = map snd . filter (flip isSubrangeOf range . fst) . unRangeMap
 #endif
 
 #ifdef USE_FINGERTREE

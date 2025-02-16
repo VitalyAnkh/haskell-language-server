@@ -1,6 +1,5 @@
 module FuzzySearch (tests) where
 
-import           Control.Monad              (guard)
 import           Data.Char                  (toLower)
 import           Data.Maybe                 (catMaybes)
 import qualified Data.Monoid.Textual        as T
@@ -8,12 +7,10 @@ import           Data.Text                  (Text, inits, pack)
 import qualified Data.Text                  as Text
 import           Prelude                    hiding (filter)
 import           System.Directory           (doesFileExist)
-import           System.Info.Extra          (isWindows)
 import           System.IO.Unsafe           (unsafePerformIO)
 import           Test.QuickCheck
 import           Test.Tasty
 import           Test.Tasty.ExpectedFailure
-import           Test.Tasty.HUnit
 import           Test.Tasty.QuickCheck      (testProperty)
 import qualified Text.Fuzzy                 as Fuzzy
 import           Text.Fuzzy                 (Fuzzy (..))
@@ -68,6 +65,7 @@ replaceAt t i c =
 dictionaryPath :: FilePath
 dictionaryPath = "/usr/share/dict/words"
 
+{-# ANN dictionary ("HLint: ignore Avoid restricted function" :: String) #-}
 {-# NOINLINE dictionary #-}
 dictionary :: [Text]
 dictionary = unsafePerformIO $ do
@@ -76,7 +74,7 @@ dictionary = unsafePerformIO $ do
     then map pack . words <$> readFile dictionaryPath
     else pure []
 
-referenceImplementation ::
+referenceImplementation :: forall s t.
   (T.TextualMonoid s) =>
   -- | Pattern in lowercase except for first character
   s ->
@@ -90,7 +88,7 @@ referenceImplementation ::
   (t -> s) ->
   -- | The original value, rendered string and score.
   Maybe (Fuzzy t s)
-referenceImplementation pattern t pre post extract =
+referenceImplementation pat t pre post extract =
   if null pat then Just (Fuzzy t result totalScore) else Nothing
   where
     null :: (T.TextualMonoid s) => s -> Bool
@@ -121,7 +119,7 @@ referenceImplementation pattern t pre post extract =
         ( 0,
           1, -- matching at the start gives a bonus (cur = 1)
           mempty,
-          pattern,
+          pat,
           True
         )
         s
